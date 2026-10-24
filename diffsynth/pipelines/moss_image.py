@@ -167,7 +167,9 @@ class MOSSImageUnit_NoiseInitializer(PipelineUnit):
     def process(self, pipe: MOSSImagePipeline, height, width, seed, rand_device):
         latent_h = height // pipe.height_division_factor
         latent_w = width // pipe.width_division_factor
-        latent_channels = pipe.dit.latent_channels
+        # The DiT is absent in split training (sft:data_process); 128 is MOSSImageDiT's
+        # fixed latent width, and FlowMatchSFTLoss re-draws the noise anyway.
+        latent_channels = pipe.dit.latent_channels if pipe.dit is not None else 128
         if rand_device is None:
             rand_device = str(pipe.device)
         noise = pipe.generate_noise(
