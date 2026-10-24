@@ -5,7 +5,7 @@ DiffSynth Anima LoRA training wrapper.
 Usage:
   python lora_train_option.py                          # all defaults
   python lora_train_option.py --num-epochs 1           # override one
-  python lora_train_option.py --learning-rate 5e-5     # style LoRA on a large dataset
+  python lora_train_option.py --preset style           # style LoRA defaults
   python lora_train_option.py --lora-checkpoint ./models/train/anima_oppai_loli_lora/epoch-0.safetensors
 """
 import argparse
@@ -78,6 +78,17 @@ def check_metadata(dataset_dir: str, metadata_csv: str) -> None:
     print(f"[metadata] {len(rows)} rows | {len(missing)} missing image(s) | {empty} empty prompt(s)")
     if missing:
         raise FileNotFoundError(f"Images listed in metadata.csv not found: {missing[:5]}")
+    return len(rows)
+
+
+# Per-type defaults; any explicit flag overrides them.
+# Aim for roughly 500-1000 optimizer steps in total and pick the best epoch.
+PRESETS = {
+    # Character / object: needs to learn a specific identity -> higher LR.
+    "concept": {"learning_rate": 1e-4, "lora_rank": 32, "num_epochs": 5},
+    # Style: lower LR over more steps generalizes better; small rank suffices.
+    "style":   {"learning_rate": 5e-5, "lora_rank": 16, "num_epochs": 8},
+}
 
 
 def parse_args():
@@ -92,22 +103,28 @@ def parse_args():
                    help=f"Format 'repo:path/file.safetensors'. Default: {DEFAULT_BASE_MODEL}")
     p.add_argument("--gradient-accumulation-steps", type=int, default=8,
                    help="Default: 8")
-    p.add_argument("--num-epochs", type=int, default=5,
-                   help="Default: 5")
+    p.add_argument("--preset", choices=sorted(PRESETS), default="concept",
+                   help="Default: concept. Sets lr/rank/epochs: " +
+                        "; ".join(f"{k}={v}" for k, v in PRESETS.items()))
+    p.add_argument("--num-epochs", type=int, default=None,
+                   help="Default: from --preset")
     p.add_argument("--output-path", default=DEFAULT_OUTPUT,
                    help=f"Default: {DEFAULT_OUTPUT}")
     p.add_argument("--save-steps", type=int, default=None,
                    help="Save every N optimizer steps. Default: save once per epoch.")
-    p.add_argument("--learning-rate", type=float, default=1e-4,
-                   help="Default: 1e-4 (DiffSynth Anima LoRA example). "
-                        "Use ~2e-5..5e-5 for large datasets or if it overfits fast.")
-    p.add_argument("--lora-rank", type=int, default=32,
-                   help="Default: 32. 16 is often enough for a single style/concept.")
+    p.add_argument("--learning-rate", type=float, default=None,
+                   help="Default: from --preset. Lower to ~2e-5 if it overfits fast.")
+    p.add_argument("--lora-rank", type=int, default=None,
+                   help="Default: from --preset")
     p.add_argument("--lora-checkpoint", default=None,
                    help="Path to an existing LoRA .safetensors for warm-restart. "
                         "Note: warm-restart only loads weights; optimizer/scheduler/epoch "
                         "counter are reset on current DiffSynth main.")
-    return p.parse_args()
+    args = p.parse_args()
+    for k, v in PRESETS[args.preset].items():
+        if getattr(args, k) is None:
+            setattr(args, k, v)
+    return args
 
 
 def main():
@@ -119,7 +136,13 @@ def main():
     max_pixels = args.max_pixels or auto_max_pixels(args.dataset_base_path)
     metadata_csv = str(Path(args.dataset_base_path) / "metadata.csv")
     model_id_paths = ",".join([args.base_model, TEXT_ENC, VAE])
-    check_metadata(args.dataset_base_path, metadata_csv)
+    n_images = check_metadata(args.dataset_base_path, metadata_csv)
+    steps_per_epoch = n_images * args.dataset_repeat // args.gradient_accumulation_steps
+    total_steps = steps_per_epoch * args.num_epochs
+    print(f"[plan] preset={args.preset} lr={args.learning_rate} rank={args.lora_rank} "
+          f"epochs={args.num_epochs} | ~{steps_per_epoch} steps/epoch, ~{total_steps} total")
+    if not 300 <= total_steps <= 1500:
+        print("[plan] warning: total steps outside ~300-1500; adjust --num-epochs or --dataset-repeat")
 
     cmd = [
         PY, "-m", "accelerate.commands.launch",
